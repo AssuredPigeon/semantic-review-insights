@@ -131,3 +131,45 @@ class TokenPayload(SQLModel):
 class NewPassword(SQLModel):
     token: str
     new_password: str = Field(min_length=8, max_length=128)
+
+
+# Review models for Data/ML analysis
+class ReviewBase(SQLModel):
+    game_id: str = Field(index=True, max_length=100)
+    review_text: str
+    author: str | None = Field(default=None, max_length=255)
+    voted_up: bool | None = Field(default=None)  # True = recomendada, False = no recomendada
+    playtime_hours: float | None = Field(default=None)
+    language: str | None = Field(default="english", max_length=50)
+
+
+class ReviewCreate(ReviewBase):
+    pass
+
+
+class ReviewUpdate(SQLModel):
+    game_id: str | None = Field(default=None, max_length=100)
+    review_text: str | None = None
+    author: str | None = Field(default=None, max_length=255)
+    voted_up: bool | None = None
+    playtime_hours: float | None = None
+    language: str | None = None
+
+
+class Review(ReviewBase, table=True):
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    created_at: datetime | None = Field(
+        default_factory=get_datetime_utc,
+        sa_type=DateTime(timezone=True),  # type: ignore
+    )
+
+
+class ReviewPublic(ReviewBase):
+    id: uuid.UUID
+    created_at: datetime | None = None
+
+
+class ReviewsPublic(SQLModel):
+    data: list[ReviewPublic]
+    count: int
+

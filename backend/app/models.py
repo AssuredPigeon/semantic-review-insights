@@ -2,6 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from pydantic import EmailStr
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -161,6 +162,11 @@ class Review(ReviewBase, table=True):
     created_at: datetime | None = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),  # type: ignore
+    )
+    embedding: list[float] | None = Field(
+        default=None,
+        sa_type=Vector(384),  # all-MiniLM-L6-v2 outputs 384-dim vectors
+        exclude=True,  # never serialize embedding to API responses
     )
 
 

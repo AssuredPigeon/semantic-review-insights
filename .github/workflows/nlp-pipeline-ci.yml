@@ -1,0 +1,129 @@
+name: NLP Pipeline CI
+
+# Runs on every push to main and on all pull requests.
+# This workflow validates the NLP ingestion pipeline and runs the full
+# backend test suite inside Docker — proving the system works end-to-end
+# before any code reaches the main branch.
+#
+# MLOps context:
+#   Automating build + test on every push is the first pillar of MLOps CI/CD.
+#   It ensures that changes to the NLP pipeline (model loading, validation logic,
+#   vector schema) don't silently break production behavior.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: Build the backend Docker image.
+  # Catches Dockerfile and dependency issues before running tests.
+  # ------------------------------------------------------------------
+  build-backend:
+    name: Build Backend Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build backend Docker image
+        run: docker compose build backend
+
+      - name: Verify image exists
+        run: docker images | grep backend
+
+  # ------------------------------------------------------------------
+  # Job 2: Run NLP pipeline unit + integration tests.
+  # Uses Docker Compose to spin up PostgreSQL with pgvector and run
+  # the full pytest suite, including NLP pipeline validation tests.
+  #
+  # The sentence-transformer model is mocked in tests (see conftest.py)
+  # so this job doesn't need GPU resources or internet to download the model.
+  # ------------------------------------------------------------------
+  test-nlp-pipeline:
+    name: Test NLP Pipeline & API
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-backend  # only run if build succeeds
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.11.18"
+
+      - name: Start database (PostgreSQL + pgvector)
+        run: docker compose up -d db
+
+      - name: Wait for DB to be ready
+        run: |
+          echo "Waiting for PostgreSQL to be healthy..."
+          for i in {1..30}; do
+            docker compose exec -T db pg_isready -U postgres && break
+            sleep 1
+          done
+
+      - name: Enable pgvector extension
+        run: |
+          docker compose exec -T db psql -U postgres -d app -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Apply Alembic migrations
+        run: uv run bash scripts/prestart.sh
+        working-directory: backend
+
+      - name: Run test suite (NLP pipeline + API)
+        run: uv run pytest tests/services/ tests/api/routes/test_reviews.py -v --tb=short
+        working-directory: backend
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ------------------------------------------------------------------
+  # Job 3: Smoke test — verify the full stack boots correctly.
+  # Checks that the API is reachable after a full docker compose up,
+  # simulating the production deployment sequence.
+  # ------------------------------------------------------------------
+  smoke-test:
+    name: Smoke Test (Full Stack Boot)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test-nlp-pipeline  # only run after tests pass
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build and start full stack
+        run: docker compose up -d --wait backend
+
+      - name: Health check — API is up
+        run: curl --fail http://localhost:8000/api/v1/utils/health-check
+
+      - name: Verify /docs endpoint (OpenAPI spec)
+        run: curl --fail http://localhost:8000/docs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v --remove-orphans

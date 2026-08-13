@@ -43,6 +43,8 @@ jobs:
       DOMAIN: localhost
       ENVIRONMENT: local
       FRONTEND_HOST: http://localhost:5173
+      PROJECT_NAME: "Semantic Review Insights"
+      BACKEND_CORS_ORIGINS: "http://localhost"
 
     steps:
       - name: Checkout code

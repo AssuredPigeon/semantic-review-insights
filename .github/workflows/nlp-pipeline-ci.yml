@@ -54,7 +54,7 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # Job 1: Build the backend Docker image directly (no compose needed).
+  # Job 1: Build the backend Docker image.
   # Catches Dockerfile and dependency issues before running tests.
   # ------------------------------------------------------------------
   build-backend:
@@ -67,6 +67,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      # Create dummy .env file so docker compose doesn't throw a "file not found" error.
+      - name: Copy .env.example to .env
+        run: cp .env.example .env
 
       # Create the external network compose.yml expects.
       # In production this is created by Traefik; in CI we create it manually.
@@ -105,6 +109,10 @@ jobs:
         uses: astral-sh/setup-uv@v9
         with:
           version: "0.11.18"
+
+      # Create dummy .env file so docker compose doesn't throw a "file not found" error.
+      - name: Copy .env.example to .env
+        run: cp .env.example .env
 
       - name: Create traefik-public network
         run: docker network create traefik-public || true

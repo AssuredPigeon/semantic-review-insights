@@ -10,10 +10,9 @@ name: NLP Pipeline CI
 #   runs fast without downloading large model files.
 #
 # Architecture note:
-#   Instead of running `docker compose build` (which builds the frontend with
-#   bun + Python 3.14 and requires Traefik networking), we use GitHub Actions
-#   native service containers for PostgreSQL + pgvector. This is the standard
-#   approach for backend CI: lightweight, fast, and no infra overhead.
+#   We use an explicit `docker run` for postgres+pgvector instead of service
+#   containers, which avoids GitHub Actions service container setup issues
+#   and gives us explicit health-check control.
 
 on:
   push:
@@ -30,24 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # Native service container — spins up PostgreSQL with pgvector.
-    # No docker compose, no Traefik, no .env required.
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: ci-test-password
-          POSTGRES_DB: app
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-
-    # These env vars mirror what the backend app reads from .env.
+    # These env vars mirror what the backend app reads at runtime.
     # Safe dummy values — no real secrets needed for running tests.
     env:
       POSTGRES_SERVER: localhost
@@ -78,12 +60,30 @@ jobs:
         with:
           version: "0.11.18"
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get install -y postgresql-client
+      # Start PostgreSQL with pgvector pre-installed via explicit docker run.
+      # This avoids GitHub Actions service container setup issues.
+      - name: Start PostgreSQL + pgvector
+        run: |
+          docker run -d \
+            --name postgres-ci \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=ci-test-password \
+            -e POSTGRES_DB=app \
+            -p 5432:5432 \
+            pgvector/pgvector:pg16
+
+      - name: Wait for PostgreSQL to be ready
+        run: |
+          echo "Waiting for PostgreSQL..."
+          for i in $(seq 1 30); do
+            docker exec postgres-ci pg_isready -U postgres && echo "Ready!" && break
+            echo "Attempt $i: not ready yet, sleeping 2s..."
+            sleep 2
+          done
 
       - name: Enable pgvector extension
         run: |
-          PGPASSWORD=ci-test-password psql -h localhost -U postgres -d app \
+          docker exec postgres-ci psql -U postgres -d app \
             -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       - name: Install backend dependencies
@@ -97,3 +97,7 @@ jobs:
       - name: Run NLP pipeline & reviews tests
         run: uv run pytest tests/api/routes/test_reviews.py -v --tb=short
         working-directory: backend
+
+      - name: Stop and remove PostgreSQL container
+        if: always()
+        run: docker stop postgres-ci && docker rm postgres-ci

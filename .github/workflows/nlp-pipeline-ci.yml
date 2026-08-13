@@ -1,23 +1,19 @@
 name: NLP Pipeline CI
 
 # Runs on every push to main and on all pull requests.
-# This workflow validates the NLP ingestion pipeline and runs the full
-# backend test suite inside Docker — proving the system works end-to-end
-# before any code reaches the main branch.
+# Validates the NLP ingestion pipeline and runs the backend test suite.
 #
 # MLOps context:
-#   Automating build + test on every push is the first pillar of MLOps CI/CD.
-#   It ensures that changes to the NLP pipeline (model loading, validation logic,
-#   vector schema) don't silently break production behavior.
+#   Automating build + test on every push catches regressions in the NLP
+#   pipeline (validation logic, vectorization, DB schema) before they reach
+#   production. The sentence-transformer model is mocked in tests so CI
+#   runs fast without downloading large model files.
 #
-# Fix notes (v2):
-#   - compose.yml requires external 'traefik-public' network and DOCKER_IMAGE_BACKEND
-#     env var, which don't exist in GitHub Actions runners. We now:
-#     1. Create the traefik-public network before compose commands.
-#     2. Set all required env vars inline so compose doesn't fail on
-#        "Variable not set" errors.
-#   - The sentence-transformer model is mocked in tests so no model download
-#     happens during CI (keeps the job fast and free).
+# Architecture note:
+#   Instead of running `docker compose build` (which builds the frontend with
+#   bun + Python 3.14 and requires Traefik networking), we use GitHub Actions
+#   native service containers for PostgreSQL + pgvector. This is the standard
+#   approach for backend CI: lightweight, fast, and no infra overhead.
 
 on:
   push:
@@ -28,71 +24,43 @@ on:
 permissions:
   contents: read
 
-# All env vars that compose.yml marks as required (?Variable not set).
-# These are safe dummy values for CI — no real secrets needed.
-env:
-  DOMAIN: localhost
-  FRONTEND_HOST: http://localhost:5173
-  ENVIRONMENT: local
-  PROJECT_NAME: "Semantic Review Insights"
-  STACK_NAME: semantic-review-insights
-  BACKEND_CORS_ORIGINS: "http://localhost"
-  SECRET_KEY: ci-test-secret-key-not-for-production
-  FIRST_SUPERUSER: admin@example.com
-  FIRST_SUPERUSER_PASSWORD: ci-test-password
-  POSTGRES_SERVER: db
-  POSTGRES_PORT: 5432
-  POSTGRES_DB: app
-  POSTGRES_USER: postgres
-  POSTGRES_PASSWORD: ci-test-password
-  DOCKER_IMAGE_BACKEND: backend
-  SENTRY_DSN: ""
-  SMTP_HOST: ""
-  SMTP_USER: ""
-  SMTP_PASSWORD: ""
-  EMAILS_FROM_EMAIL: info@example.com
-
 jobs:
-  # ------------------------------------------------------------------
-  # Job 1: Build the backend Docker image.
-  # Catches Dockerfile and dependency issues before running tests.
-  # ------------------------------------------------------------------
-  build-backend:
-    name: Build Backend Docker Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      # Create dummy .env file so docker compose doesn't throw a "file not found" error.
-      - name: Copy .env.example to .env
-        run: cp .env.example .env
-
-      # Create the external network compose.yml expects.
-      # In production this is created by Traefik; in CI we create it manually.
-      - name: Create traefik-public network
-        run: docker network create traefik-public || true
-
-      - name: Build backend Docker image
-        run: docker compose build backend
-
-      - name: Verify image was built
-        run: docker images | grep backend
-
-  # ------------------------------------------------------------------
-  # Job 2: Run NLP pipeline unit + integration tests.
-  # Spins up PostgreSQL with pgvector via compose and runs pytest.
-  # The sentence-transformer model is mocked — no download needed.
-  # ------------------------------------------------------------------
   test-nlp-pipeline:
     name: Test NLP Pipeline & API
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: build-backend
+
+    # Native service container — spins up PostgreSQL with pgvector.
+    # No docker compose, no Traefik, no .env required.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-test-password
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    # These env vars mirror what the backend app reads from .env.
+    # Safe dummy values — no real secrets needed for running tests.
+    env:
+      POSTGRES_SERVER: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: app
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ci-test-password
+      SECRET_KEY: ci-test-secret-key-not-for-production
+      FIRST_SUPERUSER: admin@example.com
+      FIRST_SUPERUSER_PASSWORD: ci-test-password
+      DOMAIN: localhost
+      ENVIRONMENT: local
+      FRONTEND_HOST: http://localhost:5173
 
     steps:
       - name: Checkout code
@@ -110,27 +78,9 @@ jobs:
         with:
           version: "0.11.18"
 
-      # Create dummy .env file so docker compose doesn't throw a "file not found" error.
-      - name: Copy .env.example to .env
-        run: cp .env.example .env
-
-      - name: Create traefik-public network
-        run: docker network create traefik-public || true
-
-      - name: Start PostgreSQL + pgvector
-        run: docker compose up -d db
-
-      - name: Wait for PostgreSQL to be ready
-        run: |
-          echo "Waiting for PostgreSQL to be healthy..."
-          for i in {1..30}; do
-            docker compose exec -T db pg_isready -U postgres && break || true
-            sleep 2
-          done
-
       - name: Enable pgvector extension
         run: |
-          docker compose exec -T db psql -U postgres -d app \
+          PGPASSWORD=ci-test-password psql -h localhost -U postgres -d app \
             -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       - name: Install backend dependencies
@@ -140,15 +90,7 @@ jobs:
       - name: Apply Alembic migrations
         run: uv run bash scripts/prestart.sh
         working-directory: backend
-        env:
-          POSTGRES_SERVER: localhost
 
-      - name: Run NLP pipeline & reviews test suite
+      - name: Run NLP pipeline & reviews tests
         run: uv run pytest tests/api/routes/test_reviews.py -v --tb=short
         working-directory: backend
-        env:
-          POSTGRES_SERVER: localhost
-
-      - name: Cleanup
-        if: always()
-        run: docker compose down -v --remove-orphans

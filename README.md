@@ -15,8 +15,6 @@
 
 ## Overview
 
-> [!NOTE]
-
 Semantic Review Insights is a REST API that ingests raw, unstructured user reviews and exposes them as queryable semantic data. Instead of keyword matching, it uses **sentence embeddings + pgvector** to find reviews by *meaning* — enabling similarity search, clustering, and analytics on top of natural language.
 
 Built solo end-to-end: NLP pipeline, API layer, authentication, pagination, and testing.
